@@ -6,9 +6,6 @@ Usage: python build.py
 Output: dist/AbaqusToolkit.exe
 """
 
-import sys
-sys.path.insert(0, r"C:\tmp\pyside6")
-
 import PyInstaller.__main__
 from pathlib import Path
 
