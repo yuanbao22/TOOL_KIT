@@ -1,0 +1,192 @@
+/* ============================================================
+   Abaqus Toolkit - QSS Stylesheet (Fluent Design inspired)
+   Primary: #0078D4 | Dark: #106EBE | Light: #EFF6FC
+   ============================================================ */
+
+QMainWindow {
+    background-color: #F3F3F3;
+}
+
+/* ---- Navigation Sidebar ---- */
+
+QListWidget {
+    background-color: #FFFFFF;
+    border: none;
+    font-size: 14px;
+    min-width: 200px;
+    max-width: 220px;
+    padding: 4px;
+}
+
+QListWidget::item {
+    padding: 12px 20px;
+    border-radius: 4px;
+    margin: 2px 4px;
+    color: #333333;
+}
+
+QListWidget::item:selected {
+    background-color: #EFF6FC;
+    color: #0078D4;
+    font-weight: bold;
+}
+
+QListWidget::item:hover:!selected {
+    background-color: #F5F5F5;
+}
+
+/* ---- Group Box (Card) ---- */
+
+QGroupBox {
+    font-size: 13px;
+    font-weight: bold;
+    border: 1px solid #E0E0E0;
+    border-radius: 6px;
+    margin-top: 16px;
+    padding: 20px 16px 16px 16px;
+    background-color: #FFFFFF;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 16px;
+    padding: 0 6px;
+    color: #333333;
+}
+
+/* ---- Buttons ---- */
+
+QPushButton {
+    background-color: #0078D4;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 24px;
+    font-size: 13px;
+    min-height: 32px;
+}
+
+QPushButton:hover {
+    background-color: #106EBE;
+}
+
+QPushButton:pressed {
+    background-color: #005A9E;
+}
+
+QPushButton:disabled {
+    background-color: #CCCCCC;
+    color: #888888;
+}
+
+QPushButton[flat="true"] {
+    background-color: transparent;
+    color: #0078D4;
+    border: 1px solid #0078D4;
+}
+
+QPushButton[flat="true"]:hover {
+    background-color: #EFF6FC;
+}
+
+/* ---- Line Edit & Text Edit ---- */
+
+QLineEdit {
+    border: 1px solid #CCCCCC;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    background-color: white;
+    min-height: 32px;
+}
+
+QLineEdit:focus {
+    border-color: #0078D4;
+}
+
+QLineEdit:disabled {
+    background-color: #F3F3F3;
+    color: #999999;
+}
+
+QPlainTextEdit {
+    border: 1px solid #CCCCCC;
+    border-radius: 4px;
+    padding: 8px;
+    font-size: 12px;
+    font-family: "Consolas", "Courier New", monospace;
+    background-color: #FAFAFA;
+    color: #333333;
+}
+
+QPlainTextEdit:focus {
+    border-color: #0078D4;
+}
+
+/* ---- Status Bar ---- */
+
+QStatusBar {
+    background-color: #0078D4;
+    color: white;
+    font-size: 12px;
+    padding: 4px 12px;
+    min-height: 28px;
+}
+
+QStatusBar QLabel {
+    color: white;
+}
+
+/* ---- Scroll Bar ---- */
+
+QScrollBar:vertical {
+    background: #F3F3F3;
+    width: 8px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #CCCCCC;
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #AAAAAA;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* ---- Card-style Buttons (Dashboard quick actions) ---- */
+
+QPushButton.card-btn {
+    background-color: #FFFFFF;
+    border: 1px solid #E8E8E8;
+    border-radius: 8px;
+    padding: 16px;
+    text-align: left;
+    font-size: 14px;
+    color: #333333;
+    min-height: 48px;
+}
+
+QPushButton.card-btn:hover {
+    border-color: #0078D4;
+    background-color: #EFF6FC;
+}
+
+/* ---- Labels ---- */
+
+QLabel[heading="true"] {
+    font-size: 28px;
+    font-weight: bold;
+    color: #0078D4;
+}
+
+QLabel[subtitle="true"] {
+    font-size: 14px;
+    color: #888888;
+}
