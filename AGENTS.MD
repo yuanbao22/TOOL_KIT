@@ -15,7 +15,7 @@
 | 运行时 | **.NET** | 8.0 | 禁止使用 .NET 9+ 特性 |
 | 语言 | **C#** | 12.0 | 禁止使用 C# 13 特性 |
 | 桌面框架 | **WPF** | .NET 8 | 禁止引入 WinUI / WinForms |
-| UI 库 | **WPF UI** | 3.x | 唯一允许的第三方 UI 框架 |
+| UI 库 | **HandyControl** | 3.5.1 | 唯一允许的第三方 UI 框架 |
 | MVVM | **CommunityToolkit.Mvvm** | 8.x | Source Generator 模式 |
 | 序列化 | **System.Text.Json** | 内置 | 禁止引入 Newtonsoft.Json |
 | 日志 | **Serilog** | 最新稳定版 | 统一日志门面 |
@@ -140,7 +140,7 @@ services.AddTransient<MyViewModel>();
 
 ### 主题
 
-- 使用 WPF UI 提供的 Fluent Design 主题
+- 使用 HandyControl 提供的 Fluent Design 主题
 - 自定义样式写在 `Styles/` 目录下
 - 所有自定义 ResourceDictionary 在 `App.xaml` 中合并
 
@@ -255,8 +255,39 @@ dotnet publish AbaqusToolkit/AbaqusToolkit.csproj -c Release -r win-x64 --self-c
 
 ---
 
+## 项目状态
+
+### 当前功能
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| INP 文件合并 | ✅ 已完成 | 合并两个 INP 文件，自动重编号节点/单元 |
+| 仪表盘首页 | ✅ 已完成 | 展示项目信息和快捷入口 |
+
+### 功能规划
+
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| INP 文件差异对比 | P2 | 两个 INP 文件的结构化差异展示 |
+| 批量节点/单元重编号 | P2 | 对 INP 内节点/单元重新编号 |
+| 关键字搜索与替换 | P2 | 在 INP 文件中批量搜索替换关键字 |
+| 批量提交 Abaqus 计算 | P1 | 多个 INP 排队提交，监控计算状态 |
+| ODB 结果提取 | P3 | 从 .odb 文件提取特定结果到 CSV |
+| INP 语法检查 | P3 | 基本的 INP 文件正确性校验 |
+| 模板管理 | P3 | 常用 INP 模板（材料、边界条件等） |
+
+### 技术债务
+
+- [ ] MainViewModel 目前为空，待完善导航逻辑
+- [ ] Assembly 合并逻辑为硬编码，需根据实际文件动态生成
+- [ ] 缺少全局异常处理界面展示
+- [ ] 未实现设置持久化（用户偏好、文件历史）
+
+---
+
 ## 版本记录
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-05-19 | 1.1 | 修正技术栈为 HandyControl 3.5.1，添加项目状态和功能规划 |
 | 2026-05-19 | 1.0 | 初始版本，建立顶层规范 |
