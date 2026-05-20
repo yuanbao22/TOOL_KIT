@@ -7,7 +7,6 @@ Usage:
 """
 
 import sys
-sys.path.insert(0, r"C:\tmp\pyside6")
 
 import logging
 from pathlib import Path
