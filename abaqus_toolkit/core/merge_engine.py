@@ -8,16 +8,69 @@ Merge engine for combining two Abaqus INP files via a 6-phase pipeline.
   Phase 4: Read + parse file2, write parts (renumbered with offsets)
   Phase 5: Write merged Assembly (instances, ref nodes, nsets, elsets,
            surfaces, couplings with conflict resolution & renaming)
-  Phase 6: Write file1 material/step lines to output
+  Phase 6: Merge material/step sections from both files with conflict
+           resolution (material/step dedup, BC/load renumbering,
+           output dedup).
 
 Maps 1:1 from the C# InpMergeService.WriteAssembly logic.
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import inp_parser, inp_writer
 from .models import InpAssemblyElset, InpCoupling, InpFileModel, InpInstance, InpNode, InpSet, InpSurface, MergeResult
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Internal types for material/step block parsing
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class _TopBlock:
+    """A top-level block in the material/step section.
+
+    Attributes:
+        type: One of ``"material"``, ``"step"``, or ``"other"``.
+        name: The block name (e.g. material name, step name).
+        lines: All raw lines belonging to this block.
+    """
+    type: str = ""          # "material" | "step" | "other"
+    name: str = ""          # name parameter value
+    lines: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _StepSubBlock:
+    """A sub-block within a parsed step.
+
+    Attributes:
+        category: ``"boundary"`` | ``"load"`` | ``"output_field"``
+                  | ``"output_history"`` | ``"other"``
+        name: The ``name=`` parameter value (empty if none).
+        lines: All raw lines of this sub-block.
+    """
+    category: str = ""      # see above
+    name: str = ""          # name parameter value
+    lines: list[str] = field(default_factory=list)
+
+
+# Keywords that normally carry a ``name=`` parameter and represent
+# loading conditions within a step.
+_LOAD_KEYWORDS = frozenset({
+    "Cload", "Dload", "Dsload", "Cflux", "Dsflux", "Dflux",
+    "Film", "Radiation",
+})
+
+# Sub-keywords that belong to a parent keyword block (not separate blocks).
+# Used so *Node Output / *Element Output under *Output are kept as
+# data lines rather than becoming independent sub-blocks.
+_OUTPUT_SUB_KEYWORDS = frozenset({
+    "Node Output", "Element Output", "Contact Output",
+    "Section Output",
+})
 
 
 class MergeEngine:
@@ -157,9 +210,9 @@ class MergeEngine:
                 output_lines, model1, model2, node_offset, elem_offset, existing_names
             )
 
-            # Phase 6: Write material/step
-            self._log("Phase 6: Writing material/step...")
-            output_lines.extend(model1.material_step_lines)
+            # Phase 6: Merge material/step sections
+            self._log("Phase 6: Merging material/step...")
+            self._merge_material_step(output_lines, model1, model2)
 
             # ---- Write output file --------------------------------------
             Path(output_path).write_text(
@@ -369,6 +422,398 @@ class MergeEngine:
         self._log(
             f"  Assembly written: {instance_count} instance(s), "
             f"{surface_total} surface(s), {coupling_total} constraint(s)"
+        )
+
+    # ------------------------------------------------------------------
+    #  Helper: extract a single parameter value from a keyword line
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_param(line: str, param_name: str) -> str:
+        """
+        Extract a parameter value from a keyword line (case-insensitive).
+
+        Example::
+
+            _get_param("*Boundary, type=DISPLACEMENT, name=BC-1", "name")
+            # => "BC-1"
+
+        Returns ``""`` if the parameter is not found.
+        """
+        target = param_name.lower()
+        comma = line.find(",")
+        if comma < 0:
+            return ""
+        for part in line[comma + 1:].split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                if k.strip().lower() == target:
+                    return v.strip()
+        return ""
+
+    # ------------------------------------------------------------------
+    #  Material/step block parsers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_top_blocks(lines: list[str]) -> list[_TopBlock]:
+        """
+        Split raw material/step lines into top-level blocks.
+
+        Recognised blocks:
+          - ``*Material, name=...``  (type ``"material"``)
+          - ``*Step, name=...`` ... ``*End Step``  (type ``"step"``)
+          - Everything else  (type ``"other"``, passed through as-is)
+        """
+        blocks: list[_TopBlock] = []
+
+        def _is_material(line: str) -> bool:
+            return line.lstrip().startswith("*") and inp_parser._is_keyword(line, "Material")
+
+        def _is_step(line: str) -> bool:
+            return line.lstrip().startswith("*") and inp_parser._is_keyword(line, "Step")
+
+        def _is_end_step(line: str) -> bool:
+            return inp_parser._is_keyword(line, "End Step")
+
+        buf: list[str] = []
+
+        def _flush():
+            if buf:
+                blocks.append(_TopBlock(type="other", name="", lines=buf.copy()))
+                buf.clear()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if _is_material(line):
+                _flush()
+                name = MergeEngine._get_param(line, "name")
+                block_lines: list[str] = [line]
+                i += 1
+                while i < len(lines) and not _is_material(lines[i]) and not _is_step(lines[i]):
+                    block_lines.append(lines[i])
+                    i += 1
+                blocks.append(_TopBlock(type="material", name=name, lines=block_lines))
+            elif _is_step(line):
+                _flush()
+                name = MergeEngine._get_param(line, "name")
+                block_lines = [line]
+                i += 1
+                while i < len(lines) and not _is_end_step(lines[i]):
+                    block_lines.append(lines[i])
+                    i += 1
+                if i < len(lines):          # include *End Step
+                    block_lines.append(lines[i])
+                    i += 1
+                blocks.append(_TopBlock(type="step", name=name, lines=block_lines))
+            else:
+                buf.append(line)
+                i += 1
+
+        _flush()
+        return blocks
+
+    # ── Load keyword detection ─────────────────────────────────────
+
+    @staticmethod
+    def _is_load_keyword(line: str) -> bool:
+        """Check if *line* starts with a recognised load keyword."""
+        trimmed = line.lstrip()
+        if not trimmed.startswith("*"):
+            return False
+        rest = trimmed[1:]  # strip leading *
+        # Extract the keyword name (up to first comma or whitespace)
+        kw = rest.split(",")[0].strip().split()[0]
+        return kw in _LOAD_KEYWORDS
+
+    @staticmethod
+    def _is_output_sub_keyword(line: str) -> bool:
+        """Check if *line* is a sub-keyword of an output block
+        (e.g. ``*Node Output``, ``*Element Output``)."""
+        trimmed = line.lstrip()
+        if not trimmed.startswith("*"):
+            return False
+        rest = trimmed[1:].lstrip()
+        for sub_kw in _OUTPUT_SUB_KEYWORDS:
+            if rest.lower().startswith(sub_kw.lower()):
+                return True
+        return False
+
+    # ── Step sub-block parser ─────────────────────────────────────
+
+    @staticmethod
+    def _parse_step_sub_blocks(step_lines: list[str]) -> list[_StepSubBlock]:
+        """
+        Parse a step's body (everything between ``*Step`` and ``*End Step``)
+        into sub-blocks.
+
+        Classification rules:
+          - ``*Boundary, name=...``  → category ``"boundary"``
+          - Load keywords (see ``_LOAD_KEYWORDS``) with ``name=`` → ``"load"``
+          - ``*Output, field`` → ``"output_field"``
+          - ``*Output, history`` → ``"output_history"``
+          - Everything else → ``"other"``
+        """
+        blocks: list[_StepSubBlock] = []
+        i = 0
+
+        def _is_sub_keyword(line: str) -> bool:
+            """True if *line* starts a keyword (not comment, not *End Step)."""
+            trimmed = line.lstrip()
+            if not trimmed.startswith("*"):
+                return False
+            if trimmed.startswith("**"):
+                return False
+            if inp_parser._is_keyword(line, "End Step"):
+                return False
+            return True
+
+        def _classify(line: str) -> tuple[str, str]:
+            """Return (category, name) for a keyword line."""
+            trimmed = line.lstrip()
+            if inp_parser._is_keyword(line, "Boundary"):
+                return ("boundary", MergeEngine._get_param(line, "name"))
+            if MergeEngine._is_load_keyword(line):
+                return ("load", MergeEngine._get_param(line, "name"))
+            if trimmed.startswith("*Output") and not trimmed.startswith("**"):
+                params = {}
+                comma = trimmed.find(",")
+                if comma >= 0:
+                    for part in trimmed[comma + 1:].split(","):
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            params[k.strip().lower()] = v.strip()
+                        else:
+                            params[part.strip().lower()] = ""
+                if "field" in params:
+                    return ("output_field", "")
+                if "history" in params:
+                    return ("output_history", "")
+                return ("output_other", "")
+            return ("other", "")
+
+        while i < len(step_lines):
+            line = step_lines[i]
+            trimmed = line.lstrip()
+            if inp_parser._is_keyword(line, "End Step"):
+                break
+            if not trimmed or trimmed.startswith("**") or not _is_sub_keyword(line):
+                # Non-keyword / comment content — group into an "other" block
+                blk_lines: list[str] = []
+                while i < len(step_lines):
+                    cline = step_lines[i]
+                    if (
+                        inp_parser._is_keyword(cline, "End Step")
+                        or _is_sub_keyword(cline)
+                    ):
+                        break
+                    blk_lines.append(cline)
+                    i += 1
+                if blk_lines:
+                    # Attach to the last "other" block if the last block is also "other"
+                    if blocks and blocks[-1].category == "other":
+                        blocks[-1].lines.extend(blk_lines)
+                    else:
+                        blocks.append(
+                            _StepSubBlock(category="other", name="", lines=blk_lines)
+                        )
+            else:
+                # Keyword line — start a new sub-block
+                cat, name = _classify(line)
+                blk_lines = [line]
+                i += 1
+                # Collect data lines up to the next keyword or *End Step.
+                # For output blocks, sub-keywords (*Node Output, etc.)
+                # are treated as data lines rather than separate blocks.
+                while i < len(step_lines):
+                    cline = step_lines[i]
+                    ctrimmed = cline.lstrip()
+                    if inp_parser._is_keyword(cline, "End Step"):
+                        break
+                    if ctrimmed.startswith("*") and not ctrimmed.startswith("**"):
+                        if cat in ("output_field", "output_history") and MergeEngine._is_output_sub_keyword(cline):
+                            blk_lines.append(cline)
+                            i += 1
+                            continue
+                        break
+                    blk_lines.append(cline)
+                    i += 1
+                blocks.append(
+                    _StepSubBlock(category=cat, name=name, lines=blk_lines)
+                )
+
+        return blocks
+
+    # ── Block normalisation for output dedup ──────────────────────
+
+    @staticmethod
+    def _block_text(lines: list[str]) -> str:
+        """Return a normalised string of block lines for equality comparison."""
+        return "\n".join(
+            l.rstrip().lower() for l in lines if l.strip()
+        )
+
+    # ------------------------------------------------------------------
+    #  Phase 6: Merge material/step sections
+    # ------------------------------------------------------------------
+
+    def _merge_material_step(
+        self,
+        output_lines: list[str],
+        model1: InpFileModel,
+        model2: InpFileModel,
+    ) -> None:
+        """
+        Merge material/step sections from both files.
+
+        Conflict resolution rules:
+          - **Material name** duplicates → dedup (keep first only)
+          - **Step name** duplicates → dedup (keep first only)
+          - **Boundary name** duplicates → renumber with ``_2`` suffix
+          - **Load name** duplicates → renumber with ``_2`` suffix
+          - **Output field/history** duplicates → dedup by content
+
+        If *model2* has no material/step section, falls back to writing
+        only *model1* content (preserving current behaviour).
+        """
+        if not model2.material_step_lines:
+            output_lines.extend(model1.material_step_lines)
+            return
+
+        # ── Parse both sides ───────────────────────────────────────
+        blocks1 = self._parse_top_blocks(model1.material_step_lines)
+        blocks2 = self._parse_top_blocks(model2.material_step_lines)
+
+        # ── Collect file1 names ────────────────────────────────────
+        material_names_1: set[str] = set()
+        step_names_1: set[str] = set()
+        for blk in blocks1:
+            if blk.type == "material":
+                material_names_1.add(blk.name)
+            elif blk.type == "step":
+                step_names_1.add(blk.name)
+
+        # ── Collect sub-block names from file1 for conflict detection ──
+        bc_names_1: set[str] = set()      # boundary names from file1
+        load_names_1: set[str] = set()     # load names from file1
+
+        for blk in blocks1:
+            if blk.type == "step":
+                sub_blocks = self._parse_step_sub_blocks(blk.lines)
+                for sb in sub_blocks:
+                    if sb.category == "boundary" and sb.name:
+                        bc_names_1.add(sb.name)
+                    elif sb.category == "load" and sb.name:
+                        load_names_1.add(sb.name)
+
+        self._log(
+            f"  Material/step merge: "
+            f"{len(material_names_1)} material(s), "
+            f"{len(step_names_1)} step(s) from file 1"
+        )
+        self._log(
+            f"  → {len(bc_names_1)} BC name(s), "
+            f"{len(load_names_1)} load name(s) tracked"
+        )
+
+        # ── Phase 6a: Write file1 blocks unchanged ────────────────
+        for blk in blocks1:
+            output_lines.extend(blk.lines)
+
+        # ── Phase 6b: Write file2 blocks with conflict resolution ──
+        bc_counters: dict[str, int] = {}
+        load_counters: dict[str, int] = {}
+
+        file2_materials_kept = 0
+        file2_steps_kept = 0
+
+        for blk in blocks2:
+            if blk.type == "material":
+                if blk.name not in material_names_1:
+                    output_lines.extend(blk.lines)
+                    file2_materials_kept += 1
+                else:
+                    self._log(f"    → Skipping duplicate material: {blk.name}")
+
+            elif blk.type == "step":
+                if blk.name in step_names_1:
+                    self._log(f"    → Skipping duplicate step: {blk.name}")
+                    continue
+
+                # Write *Step line
+                output_lines.append(blk.lines[0])
+                file2_steps_kept += 1
+
+                # Parse step body (skip *Step header line) and apply
+                # conflict resolution
+                sub_blocks = self._parse_step_sub_blocks(blk.lines[1:])
+                _step_outputs: set[str] = set()  # per-step output dedup
+
+                for sb in sub_blocks:
+                    if sb.category == "boundary" and sb.name:
+                        if sb.name in bc_names_1:
+                            bc_counters[sb.name] = bc_counters.get(sb.name, 1) + 1
+                            new_name = f"{sb.name}_{bc_counters[sb.name]}"
+                            # Rename in the keyword line
+                            kw_line = sb.lines[0]
+                            new_kw_line = kw_line.replace(
+                                f"name={sb.name}", f"name={new_name}"
+                            )
+                            output_lines.append(new_kw_line)
+                            output_lines.extend(sb.lines[1:])
+                            self._log(
+                                f"    → Renamed boundary: {sb.name} → {new_name}"
+                            )
+                        else:
+                            bc_names_1.add(sb.name)
+                            output_lines.extend(sb.lines)
+
+                    elif sb.category == "load" and sb.name:
+                        if sb.name in load_names_1:
+                            load_counters[sb.name] = load_counters.get(sb.name, 1) + 1
+                            new_name = f"{sb.name}_{load_counters[sb.name]}"
+                            kw_line = sb.lines[0]
+                            new_kw_line = kw_line.replace(
+                                f"name={sb.name}", f"name={new_name}"
+                            )
+                            output_lines.append(new_kw_line)
+                            output_lines.extend(sb.lines[1:])
+                            self._log(
+                                f"    → Renamed load: {sb.name} → {new_name}"
+                            )
+                        else:
+                            load_names_1.add(sb.name)
+                            output_lines.extend(sb.lines)
+
+                    elif sb.category in ("output_field", "output_history"):
+                        text = self._block_text(sb.lines)
+                        if text in _step_outputs:
+                            self._log(
+                                f"    → Skipping duplicate output: "
+                                f"{sb.lines[0].strip()}"
+                            )
+                        else:
+                            _step_outputs.add(text)
+                            output_lines.extend(sb.lines)
+
+                    else:
+                        # "other" or unnamed sub-blocks — pass through
+                        output_lines.extend(sb.lines)
+
+                # Write *End Step (last line of the original step block)
+                if len(blk.lines) > 1 and inp_parser._is_keyword(
+                    blk.lines[-1], "End Step"
+                ):
+                    output_lines.append(blk.lines[-1])
+
+            else:
+                # "other" blocks — pass through as-is
+                output_lines.extend(blk.lines)
+
+        self._log(
+            f"  Phase 6 complete: +{file2_materials_kept} material(s), "
+            f"+{file2_steps_kept} step(s) from file 2"
         )
 
     # ------------------------------------------------------------------
