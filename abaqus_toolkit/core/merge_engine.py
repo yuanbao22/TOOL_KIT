@@ -741,102 +741,127 @@ class MergeEngine:
             f"{len(load_names_1)} load name(s) tracked"
         )
 
-        # ── Phase 6a: Write file1 blocks unchanged ────────────────
-        for blk in blocks1:
+        # ── Helper: collect non-duplicate material blocks ──────────
+        def _collect_materials(
+            blocks: list[_TopBlock], name_filter: set[str]
+        ) -> tuple[list[_TopBlock], set[str]]:
+            kept_blocks: list[_TopBlock] = []
+            seen = name_filter.copy()
+            for blk in blocks:
+                if blk.type == "material":
+                    if blk.name not in seen:
+                        seen.add(blk.name)
+                        kept_blocks.append(blk)
+                elif blk.type != "step":
+                    # "other" blocks — pass through as-is
+                    kept_blocks.append(blk)
+            return kept_blocks, seen
+
+        # ── Helper: collect non-duplicate step blocks ──────────────
+        def _collect_steps(
+            blocks: list[_TopBlock], name_filter: set[str]
+        ) -> list[_TopBlock]:
+            kept: list[_TopBlock] = []
+            for blk in blocks:
+                if blk.type == "step":
+                    if blk.name not in name_filter:
+                        name_filter.add(blk.name)
+                        kept.append(blk)
+            return kept
+
+        # ── Separate blocks from both files ───────────────────────
+        # Phase 6a: materials (and other non-step) blocks
+        # Phase 6b: step blocks
+        step_names_all: set[str] = set()
+        mat_blocks_all, _ = _collect_materials(blocks1, set())
+        f2_mat_blocks, mat_names_all = _collect_materials(blocks2, material_names_1)
+        mat_blocks_all.extend(f2_mat_blocks)
+
+        step_blocks_all = _collect_steps(blocks1, step_names_all)
+        f2_step_blocks = _collect_steps(blocks2, step_names_all)
+        step_blocks_all.extend(f2_step_blocks)
+
+        # ── Write all materials (plus other non-step blocks) ──────
+        for blk in mat_blocks_all:
+            if blk.type == "material" and blk.name not in material_names_1:
+                self._log(f"    → Added material: {blk.name}")
             output_lines.extend(blk.lines)
 
-        # ── Phase 6b: Write file2 blocks with conflict resolution ──
+        # ── Write all steps with conflict resolution ──────────────
         bc_counters: dict[str, int] = {}
         load_counters: dict[str, int] = {}
-
-        file2_materials_kept = 0
         file2_steps_kept = 0
 
-        for blk in blocks2:
-            if blk.type == "material":
-                if blk.name not in material_names_1:
-                    output_lines.extend(blk.lines)
-                    file2_materials_kept += 1
-                else:
-                    self._log(f"    → Skipping duplicate material: {blk.name}")
-
-            elif blk.type == "step":
-                if blk.name in step_names_1:
-                    self._log(f"    → Skipping duplicate step: {blk.name}")
-                    continue
-
-                # Write *Step line
-                output_lines.append(blk.lines[0])
+        for blk in step_blocks_all:
+            is_from_file2 = blk.name not in step_names_1
+            if is_from_file2:
                 file2_steps_kept += 1
 
-                # Parse step body (skip *Step header line) and apply
-                # conflict resolution
-                sub_blocks = self._parse_step_sub_blocks(blk.lines[1:])
-                _step_outputs: set[str] = set()  # per-step output dedup
+            # Write *Step line
+            output_lines.append(blk.lines[0])
 
-                for sb in sub_blocks:
-                    if sb.category == "boundary" and sb.name:
-                        if sb.name in bc_names_1:
-                            bc_counters[sb.name] = bc_counters.get(sb.name, 1) + 1
-                            new_name = f"{sb.name}_{bc_counters[sb.name]}"
-                            # Rename in the keyword line
-                            kw_line = sb.lines[0]
-                            new_kw_line = kw_line.replace(
-                                f"name={sb.name}", f"name={new_name}"
-                            )
-                            output_lines.append(new_kw_line)
-                            output_lines.extend(sb.lines[1:])
-                            self._log(
-                                f"    → Renamed boundary: {sb.name} → {new_name}"
-                            )
-                        else:
-                            bc_names_1.add(sb.name)
-                            output_lines.extend(sb.lines)
+            # Parse step body (skip *Step header line) and apply
+            # conflict resolution (file2 only)
+            sub_blocks = self._parse_step_sub_blocks(blk.lines[1:])
+            _step_outputs: set[str] = set()
 
-                    elif sb.category == "load" and sb.name:
-                        if sb.name in load_names_1:
-                            load_counters[sb.name] = load_counters.get(sb.name, 1) + 1
-                            new_name = f"{sb.name}_{load_counters[sb.name]}"
-                            kw_line = sb.lines[0]
-                            new_kw_line = kw_line.replace(
-                                f"name={sb.name}", f"name={new_name}"
-                            )
-                            output_lines.append(new_kw_line)
-                            output_lines.extend(sb.lines[1:])
-                            self._log(
-                                f"    → Renamed load: {sb.name} → {new_name}"
-                            )
-                        else:
-                            load_names_1.add(sb.name)
-                            output_lines.extend(sb.lines)
-
-                    elif sb.category in ("output_field", "output_history"):
-                        text = self._block_text(sb.lines)
-                        if text in _step_outputs:
-                            self._log(
-                                f"    → Skipping duplicate output: "
-                                f"{sb.lines[0].strip()}"
-                            )
-                        else:
-                            _step_outputs.add(text)
-                            output_lines.extend(sb.lines)
-
+            for sb in sub_blocks:
+                if is_from_file2 and sb.category == "boundary" and sb.name:
+                    if sb.name in bc_names_1:
+                        bc_counters[sb.name] = bc_counters.get(sb.name, 1) + 1
+                        new_name = f"{sb.name}_{bc_counters[sb.name]}"
+                        kw_line = sb.lines[0]
+                        new_kw_line = kw_line.replace(
+                            f"name={sb.name}", f"name={new_name}"
+                        )
+                        output_lines.append(new_kw_line)
+                        output_lines.extend(sb.lines[1:])
+                        self._log(
+                            f"    → Renamed boundary: {sb.name} → {new_name}"
+                        )
                     else:
-                        # "other" or unnamed sub-blocks — pass through
+                        bc_names_1.add(sb.name)
                         output_lines.extend(sb.lines)
 
-                # Write *End Step (last line of the original step block)
-                if len(blk.lines) > 1 and inp_parser._is_keyword(
-                    blk.lines[-1], "End Step"
-                ):
-                    output_lines.append(blk.lines[-1])
+                elif is_from_file2 and sb.category == "load" and sb.name:
+                    if sb.name in load_names_1:
+                        load_counters[sb.name] = load_counters.get(sb.name, 1) + 1
+                        new_name = f"{sb.name}_{load_counters[sb.name]}"
+                        kw_line = sb.lines[0]
+                        new_kw_line = kw_line.replace(
+                            f"name={sb.name}", f"name={new_name}"
+                        )
+                        output_lines.append(new_kw_line)
+                        output_lines.extend(sb.lines[1:])
+                        self._log(
+                            f"    → Renamed load: {sb.name} → {new_name}"
+                        )
+                    else:
+                        load_names_1.add(sb.name)
+                        output_lines.extend(sb.lines)
 
-            else:
-                # "other" blocks — pass through as-is
-                output_lines.extend(blk.lines)
+                elif sb.category in ("output_field", "output_history"):
+                    text = self._block_text(sb.lines)
+                    if text in _step_outputs:
+                        self._log(
+                            f"    → Skipping duplicate output: "
+                            f"{sb.lines[0].strip()}"
+                        )
+                    else:
+                        _step_outputs.add(text)
+                        output_lines.extend(sb.lines)
+
+                else:
+                    output_lines.extend(sb.lines)
+
+            # Write *End Step
+            if len(blk.lines) > 1 and inp_parser._is_keyword(
+                blk.lines[-1], "End Step"
+            ):
+                output_lines.append(blk.lines[-1])
 
         self._log(
-            f"  Phase 6 complete: +{file2_materials_kept} material(s), "
+            f"  Phase 6 complete: +{len(f2_mat_blocks)} material(s), "
             f"+{file2_steps_kept} step(s) from file 2"
         )
 
