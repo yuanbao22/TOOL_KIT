@@ -266,8 +266,12 @@ class MergeEngine:
         instance_count = 0
 
         # --- Instances --------------------------------------------------
+        # File 1 instance names (tracked to detect conflicts)
+        instance_names_1: set[str] = set()
+
         # File 1 instances (as-is)
         for inst in model1.assembly_instances:
+            instance_names_1.add(inst.name)
             output_lines.append(f"*Instance, name={inst.name}, part={inst.part_name}")
             if inst.has_offset:
                 output_lines.append(
@@ -277,14 +281,27 @@ class MergeEngine:
             output_lines.append("**  ")
             instance_count += 1
 
-        # File 2 instances (update part= if that part was renamed)
+        # File 2 instances (resolve name + part conflicts)
+        instance_name_map: dict[str, str] = {}
         for inst in model2.assembly_instances:
+            # Rename instance if its name already exists in file1
+            new_inst_name = inst.name
+            if inst.name in instance_names_1:
+                new_inst_name = f"{inst.name}-2"
+                self._log(
+                    f"    → Renamed instance: {inst.name} → {new_inst_name}"
+                )
+            instance_name_map[inst.name] = new_inst_name
+
+            # Update part reference (part may have been renamed too)
             part_name = (
                 inst.part_name + "-2"
                 if inst.part_name in file1_part_names
                 else inst.part_name
             )
-            output_lines.append(f"*Instance, name={inst.name}, part={part_name}")
+            output_lines.append(
+                f"*Instance, name={new_inst_name}, part={part_name}"
+            )
             if inst.has_offset:
                 output_lines.append(
                     f"       {inst.offset_x:g}, {inst.offset_y:g}, {inst.offset_z:g}"
@@ -349,10 +366,17 @@ class MergeEngine:
                 elset_name_counts[elset.name] = 1
             elset_name_map[elset.name] = new_name
 
-            # Replace elset=... in the keyword line with renamed value
-            new_keyword_line = elset.keyword_line.replace(
+            # Replace elset=... and instance=... in the keyword line
+            # with renamed values
+            new_keyword_line = elset.keyword_line
+            new_keyword_line = new_keyword_line.replace(
                 f"elset={elset.name}", f"elset={new_name}"
             )
+            if elset.instance_name and elset.instance_name in instance_name_map:
+                new_keyword_line = new_keyword_line.replace(
+                    f"instance={elset.instance_name}",
+                    f"instance={instance_name_map[elset.instance_name]}",
+                )
             output_lines.append(new_keyword_line)
             output_lines.extend(elset.data_lines)
 
