@@ -40,6 +40,7 @@ class InpSet:
     end: int = 0
     step: int = 0
     ids: list[int] = field(default_factory=list)
+    keyword_line: str = ""  # original keyword line, preserves instance=/internal
 
 
 @dataclass
@@ -101,6 +102,7 @@ class InpSurface:
     name: str = ""
     type: str = ""
     entries: list[InpSurfaceEntry] = field(default_factory=list)
+    keyword_line: str = ""  # original keyword line, preserves internal etc.
 
 
 @dataclass

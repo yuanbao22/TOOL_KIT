@@ -385,7 +385,11 @@ class MergeEngine:
         surface_name_counts: dict[str, int] = {}
         for surf in model1.assembly_surfaces:
             surface_name_counts[surf.name] = 1
-            output_lines.append(f"*Surface, type={surf.type}, name={surf.name}")
+            # Use original keyword_line to preserve internal etc.
+            if surf.keyword_line:
+                output_lines.append(surf.keyword_line)
+            else:
+                output_lines.append(f"*Surface, type={surf.type}, name={surf.name}")
             for entry in surf.entries:
                 output_lines.append(f"{entry.elset_name}, {entry.face_label}")
 
@@ -400,7 +404,12 @@ class MergeEngine:
                 surface_name_counts[surf.name] = 1
             surface_name_map[surf.name] = new_name
 
-            output_lines.append(f"*Surface, type={surf.type}, name={new_name}")
+            # Use original keyword_line with name replaced
+            if surf.keyword_line and surf.name:
+                kw = surf.keyword_line.replace(f"name={surf.name}", f"name={new_name}")
+                output_lines.append(kw)
+            else:
+                output_lines.append(f"*Surface, type={surf.type}, name={new_name}")
             for entry in surf.entries:
                 new_elset_name = elset_name_map.get(entry.elset_name, entry.elset_name)
                 output_lines.append(f"{new_elset_name}, {entry.face_label}")
@@ -911,6 +920,14 @@ class MergeEngine:
             output_lines.append(
                 f"{nset.start + id_offset}, {nset.end + id_offset}, {nset.step}"
             )
+        elif nset.keyword_line:
+            # Preserve original keyword parameters (instance=, internal, etc.)
+            kw = nset.keyword_line
+            if nset.name:
+                kw = kw.replace(f"nset={nset.name}", f"nset={name}")
+            output_lines.append(kw)
+            offset_ids = [i + id_offset for i in nset.ids]
+            output_lines.extend(MergeEngine._write_id_lines(offset_ids))
         else:
             output_lines.append(f"*Nset, nset={name}")
             offset_ids = [i + id_offset for i in nset.ids]

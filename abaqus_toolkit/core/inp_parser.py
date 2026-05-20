@@ -310,7 +310,7 @@ def _parse_set(lines: list[str], i: int, name_param: str) -> tuple[int, "InpSet 
     set_name = params.get(name_param, "")
     is_generate = "generate" in params
 
-    set_obj = InpSet(name=set_name, is_generate=is_generate)
+    set_obj = InpSet(name=set_name, is_generate=is_generate, keyword_line=lines[i].rstrip())
 
     i += 1
 
@@ -487,7 +487,7 @@ def _parse_surface(lines: list[str], i: int) -> tuple[int, "InpSurface | None"]:
     name = params.get("name", "")
     type_val = params.get("type", "")
 
-    surface = InpSurface(name=name, type=type_val)
+    surface = InpSurface(name=name, type=type_val, keyword_line=lines[i].rstrip())
 
     i += 1
 
