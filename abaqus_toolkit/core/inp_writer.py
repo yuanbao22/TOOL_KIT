@@ -5,7 +5,7 @@ Supports Part renumbering with node and element offsets.
 Maps 1:1 from the C# AbaqusToolkit.Core.Parsing.InpWriter static class.
 """
 
-from .models import InpPart
+from .models import InpOrientation, InpPart
 
 
 def format_double(value: float) -> str:
@@ -89,15 +89,23 @@ def write_part(part: InpPart, node_offset: int = 0, elem_offset: int = 0) -> lis
             new_id = node.id + node_offset
             lines.append(format_node_line(new_id, node.x, node.y, node.z))
 
-    # *Element block
+    # *Element block(s) — preserve per-type blocks when available
     if part.elements:
-        type_suffix = f", type={part.element_type}" if part.element_type else ""
-        lines.append(f"*Element{type_suffix}")
-
-        for elem in part.elements:
-            new_id = elem.id + elem_offset
-            new_node_ids = [nid + node_offset for nid in elem.node_ids]
-            lines.append(format_element_line(new_id, new_node_ids))
+        if part.element_blocks:
+            for block_type, block_elems in part.element_blocks:
+                lines.append(f"*Element, type={block_type}")
+                for elem in block_elems:
+                    new_id = elem.id + elem_offset
+                    new_node_ids = [nid + node_offset for nid in elem.node_ids]
+                    lines.append(format_element_line(new_id, new_node_ids))
+        else:
+            # Fallback: single block
+            type_suffix = f", type={part.element_type}" if part.element_type else ""
+            lines.append(f"*Element{type_suffix}")
+            for elem in part.elements:
+                new_id = elem.id + elem_offset
+                new_node_ids = [nid + node_offset for nid in elem.node_ids]
+                lines.append(format_element_line(new_id, new_node_ids))
 
     # *Nset blocks
     for nset in part.nsets:
@@ -123,9 +131,22 @@ def write_part(part: InpPart, node_offset: int = 0, elem_offset: int = 0) -> lis
             offset_ids = [id + elem_offset for id in elset.ids]
             lines.extend(write_id_lines(offset_ids))
 
+    # Orientation blocks
+    for orient in part.orientations:
+        lines.extend(orient.lines)
+
     # Solid Section lines (written as-is; references are by name not ID)
     if part.solid_section_lines:
         lines.extend(part.solid_section_lines)
+
+    # Shell Section lines (written as-is; references are by name not ID)
+    if part.shell_section_lines:
+        lines.extend(part.shell_section_lines)
+
+    # Unknown/preserved blocks (*Beam Section, *Spring, *Spring Section,
+    # *Mass, *Dashpot, etc.) — written as-is; references by name not ID
+    for block in part.unknown_block_lines:
+        lines.extend(block)
 
     # *End Part
     lines.append("*End Part")

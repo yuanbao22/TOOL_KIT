@@ -7,11 +7,13 @@ All functions are standalone — no classes needed.
 
 from .models import (
     InpAssemblyElset,
+    InpConstraint,
     InpCoupling,
     InpElement,
     InpFileModel,
     InpInstance,
     InpNode,
+    InpOrientation,
     InpPart,
     InpSet,
     InpSurface,
@@ -122,8 +124,18 @@ def _parse_one_part(lines: list[str], i: int) -> tuple[int, "InpPart | None"]:
 
         elif _is_keyword(line, "Element"):
             elem_params = _parse_parameters(line)
-            part.element_type = elem_params.get("type", "")
+            # Guard: skip false *Element matches like *Element Output
+            # which have no "type=" parameter and are step-level keywords.
+            if "type" not in elem_params:
+                i += 1
+                continue
+            block_type = elem_params["type"]
+            # Record per-block type (preserve original type for each block)
+            block_start = len(part.elements)
+            part.element_type = block_type
             i = _parse_elements(lines, i, part.elements)
+            block_elems = part.elements[block_start:]
+            part.element_blocks.append((block_type, block_elems))
             pending_comment_lines.clear()
 
         elif _is_keyword(line, "Nset"):
@@ -151,10 +163,46 @@ def _parse_one_part(lines: list[str], i: int) -> tuple[int, "InpPart | None"]:
                     part.solid_section_lines.append(lines[i])
                 i += 1
 
-        else:
-            # Unknown keyword within part — skip
+        elif _is_keyword(line, "Shell Section"):
+            # Include preceding comment lines as annotation
+            part.shell_section_lines.extend(pending_comment_lines)
             pending_comment_lines.clear()
+
+            part.shell_section_lines.append(line)
             i += 1
+            # Read data lines until next keyword or end of part
+            while i < len(lines) and not lines[i].lstrip().startswith("*") and not _is_keyword(lines[i], "End Part"):
+                if lines[i].strip():
+                    part.shell_section_lines.append(lines[i])
+                i += 1
+
+        elif _is_keyword(line, "Orientation"):
+            pending_comment_lines.clear()
+            orient_lines: list[str] = [line]
+            i += 1
+            # Read definition lines until next keyword or end of part
+            while i < len(lines) and not lines[i].lstrip().startswith("*") and not _is_keyword(lines[i], "End Part"):
+                if lines[i].strip():
+                    orient_lines.append(lines[i])
+                i += 1
+            orient_name = _parse_parameters(line).get("name", "")
+            if orient_name:
+                part.orientations.append(InpOrientation(name=orient_name, lines=orient_lines))
+
+        else:
+            # Unknown keyword within part — preserve keyword + data lines
+            # This catches *Beam Section, *Spring, *Spring Section, *Mass,
+            # *Dashpot, *Rotary Inertia, and any other unhandled keyword.
+            block_lines: list[str] = list(pending_comment_lines)
+            pending_comment_lines.clear()
+            block_lines.append(line)
+            i += 1
+            # Read data lines until next keyword or end of part
+            while i < len(lines) and not lines[i].lstrip().startswith("*") and not _is_keyword(lines[i], "End Part"):
+                if lines[i].strip():
+                    block_lines.append(lines[i])
+                i += 1
+            part.unknown_block_lines.append(block_lines)
 
     # Skip *End Part
     if i < len(lines):
@@ -164,6 +212,76 @@ def _parse_one_part(lines: list[str], i: int) -> tuple[int, "InpPart | None"]:
 
 
 # ── Phase 3: Assembly ────────────────────────────────────────────────────────
+
+# Constraint keywords recognised at the assembly level. Each defines a
+# constraint that may carry a name= (or constraint name=) parameter and
+# references surfaces, node sets, or element sets.
+_CONSTRAINT_KEYWORDS = frozenset({
+    "Tie", "Rigid Body", "Display Body", "Coupling",
+    "Embedded Element", "Equation",
+})
+
+
+def _is_assembly_constraint(line: str) -> str:
+    """Return the constraint type string if *line* is a recognised constraint
+    keyword, or ``""`` otherwise."""
+    trimmed = line.lstrip()
+    if not trimmed.startswith("*"):
+        return ""
+    # Extract the keyword name (before any comma/space)
+    rest = trimmed[1:].strip()
+    kw = rest.split(",")[0].split(" ")[0].strip()
+    # Also try 2-word forms like "Rigid Body", "Display Body", "Embedded Element"
+    for two_word in ("Rigid Body", "Display Body", "Embedded Element"):
+        if rest.lower().startswith(two_word.lower()):
+            return two_word
+    if kw in _CONSTRAINT_KEYWORDS:
+        return kw
+    return ""
+
+
+def _parse_constraint(lines: list[str], i: int, constraint_type: str) -> tuple[int, "InpConstraint | None"]:
+    """Parse a generic constraint keyword block.
+
+    Captures the keyword line, data lines, and any constraint sub-keywords
+    (e.g. ``*Kinematic``, ``*Distributing``, ``*Beam``).  Reading stops at
+    the next unrelated keyword.
+    """
+    kw_line = lines[i].rstrip()
+    params = _parse_parameters(kw_line)
+
+    # Extract name: most use name=, Coupling uses constraint name=
+    name = params.get("name", params.get("constraint name", ""))
+
+    i += 1
+    data_lines: list[str] = []
+
+    while i < len(lines):
+        trimmed = lines[i].lstrip()
+        if _is_comment(trimmed) or not trimmed:
+            i += 1
+            continue
+        if not trimmed.startswith("*"):
+            # Data line (surface pair, etc.)
+            data_lines.append(lines[i])
+            i += 1
+            continue
+        # It's a * line — check whether it is a constraint sub-keyword
+        sub = trimmed[1:].split(",")[0].strip().lower()
+        if sub in ("kinematic", "distributing", "beam", "continuum distributing"):
+            data_lines.append(lines[i])
+            i += 1
+            continue
+        # Not a sub-keyword — stop
+        break
+
+    constraint = InpConstraint(
+        type=constraint_type,
+        name=name,
+        keyword_line=kw_line,
+        data_lines=data_lines,
+    )
+    return i, constraint
 
 
 def _parse_assembly(lines: list[str], i: int, model: InpFileModel) -> int:
@@ -213,13 +331,43 @@ def _parse_assembly(lines: list[str], i: int, model: InpFileModel) -> int:
             if surf is not None:
                 model.assembly_surfaces.append(surf)
 
-        elif _is_keyword(line, "Coupling"):
-            i, coupling = _parse_coupling(lines, i)
-            if coupling is not None:
-                model.assembly_couplings.append(coupling)
-
         else:
+            constraint_type = _is_assembly_constraint(line)
+            if constraint_type:
+                i, constraint = _parse_constraint(lines, i, constraint_type)
+                if constraint is not None:
+                    model.assembly_constraints.append(constraint)
+                    # Backward compat: also populate assembly_couplings for Coupling
+                    if constraint_type == "Coupling":
+                        cp_params = _parse_parameters(line)
+                        coupling = InpCoupling(
+                            name=cp_params.get("constraint name", ""),
+                            ref_node_set=cp_params.get("ref node", ""),
+                            surface=cp_params.get("surface", ""),
+                            constraint_type=constraint.data_lines[0] if constraint.data_lines else "",
+                        )
+                        model.assembly_couplings.append(coupling)
+                continue
+            # Unknown keyword in Assembly — preserve keyword + data lines as-is
+            # Catches *Element, type=MASS, *Mass, *Spring, etc.
+            block_lines: list[str] = [line]
             i += 1
+            while i < len(lines) and not _is_keyword(lines[i], "End Assembly"):
+                trimmed = lines[i].lstrip()
+                if not trimmed:
+                    i += 1
+                    continue
+                if trimmed.startswith("*") and not trimmed.startswith("**"):
+                    break  # next keyword
+                if _is_comment(trimmed):
+                    i += 1
+                    continue
+                # Data line
+                if lines[i].strip():
+                    block_lines.append(lines[i])
+                i += 1
+            model.assembly_unknown_blocks.append(block_lines)
+            continue
 
     # Collect raw Assembly lines for passthrough
     end = min(i + 1 if i < len(lines) else i, len(lines))

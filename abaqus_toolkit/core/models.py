@@ -44,6 +44,14 @@ class InpSet:
 
 
 @dataclass
+class InpOrientation:
+    """An orientation definition inside a Part block."""
+
+    name: str = ""
+    lines: list[str] = field(default_factory=list)
+
+
+@dataclass
 class InpPart:
     """Represents a Part section (*Part ... *End Part) in an INP file."""
 
@@ -51,9 +59,18 @@ class InpPart:
     element_type: str = ""
     nodes: list[InpNode] = field(default_factory=list)
     elements: list[InpElement] = field(default_factory=list)
+    element_blocks: list[tuple[str, list[InpElement]]] = field(default_factory=list)
+    """Element blocks grouped by type. Each entry: (type_str, elements_list).
+    Populated during parsing to preserve per-block element types.
+    Falls back to [(element_type, elements)] when empty."""
     nsets: list[InpSet] = field(default_factory=list)
     elsets: list[InpSet] = field(default_factory=list)
+    orientations: list[InpOrientation] = field(default_factory=list)
     solid_section_lines: list[str] = field(default_factory=list)
+    shell_section_lines: list[str] = field(default_factory=list)
+    unknown_block_lines: list[list[str]] = field(default_factory=list)
+    """Preserved unknown keyword blocks (e.g. *Beam Section, *Spring, etc.).
+    Each entry is a list of lines: [keyword_line, data_line_1, ...]."""
 
 
 @dataclass
@@ -116,6 +133,21 @@ class InpCoupling:
 
 
 @dataclass
+class InpConstraint:
+    """A generic constraint definition in the Assembly section.
+
+    Covers *Tie, *Rigid Body, *Display Body, *Coupling, and any other
+    constraint keyword. Stores raw lines for faithful reproduction.
+    """
+
+    type: str = ""           # e.g. "Tie", "Rigid Body", "Coupling", "Display Body"
+    name: str = ""           # name= (or constraint name= for Coupling)
+    keyword_line: str = ""   # full original keyword line
+    data_lines: list[str] = field(default_factory=list)
+    """Lines after the keyword: data lines + sub-keywords (e.g. *Kinematic)."""
+
+
+@dataclass
 class InpFileModel:
     """
     Top-level model representing a complete parsed INP file.
@@ -131,7 +163,12 @@ class InpFileModel:
     assembly_elsets: list[InpAssemblyElset] = field(default_factory=list)
     assembly_surfaces: list[InpSurface] = field(default_factory=list)
     assembly_couplings: list[InpCoupling] = field(default_factory=list)
+    assembly_constraints: list[InpConstraint] = field(default_factory=list)
+    """All constraint definitions (*Tie, *Rigid Body, *Coupling, *Display Body, etc.)."""
     assembly_lines: list[str] = field(default_factory=list)
+    assembly_unknown_blocks: list[list[str]] = field(default_factory=list)
+    """Preserved unknown keyword blocks in Assembly (e.g. *Element, type=MASS
+    + data lines, *Mass, *Spring, etc.). Each entry is [keyword, data_1, ...]."""
     material_step_lines: list[str] = field(default_factory=list)
 
 
