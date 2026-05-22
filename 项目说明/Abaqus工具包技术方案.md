@@ -91,13 +91,15 @@ abaqus_toolkit/
 | `InpNode` | `id, x, y, z` | 节点坐标 |
 | `InpElement` | `id, node_ids[]` | 单元及连接节点 |
 | `InpSet` | `name, is_generate, start, end, step, ids[]` | 节点集/单元集（支持 generate 和显式列表） |
-| `InpPart` | `name, element_type, nodes[], elements[], nsets[], elsets[], solid_section_lines[]` | 一个 Part 段 |
+| `InpOrientation` | `name, lines[]` | Part 级材料方向定义 |
+| `InpPart` | `name, element_type, nodes[], elements[], element_blocks[], nsets[], elsets[], orientations[], solid_section_lines[], shell_section_lines[], unknown_block_lines[]` | 一个 Part 段（含未知关键字块的通用保留） |
 | `InpInstance` | `name, part_name, offset_x/y/z, has_offset` | Assembly 中的 Instance |
 | `InpAssemblyElset` | `name, instance_name, is_generate, start, end, step, ids[], keyword_line, data_lines[]` | Assembly 级 Elset |
 | `InpSurfaceEntry` | `elset_name, face_label` | Surface 的 face 条目 |
 | `InpSurface` | `name, type, entries[]` | Surface 定义 |
 | `InpCoupling` | `name, ref_node_set, surface, constraint_type` | Coupling 约束 |
-| `InpFileModel` | `heading_lines[], parts[], assembly_*, material_step_lines[]` | 完整 INP 文件模型 |
+| `InpConstraint` | `type, name, keyword_line, data_lines[]` | 通用约束（Tie / Rigid Body / Coupling 等） |
+| `InpFileModel` | `heading_lines[], parts[], assembly_*, assembly_unknown_blocks[], material_step_lines[]` | 完整 INP 文件模型（含 Assembly 级未知关键字块保留） |
 
 ### 4.2 结果模型
 
@@ -126,6 +128,8 @@ def parse(lines: list[str]) -> InpFileModel
 **解析阶段**：
 1. Heading → 2. Parts → 3. Assembly → 4. Material / Step
 
+**通用关键字保留**：Part 和 Assembly 解析器的 `else` 分支采用通用捕获机制，任何未显式处理的 INP 关键字块按原样保留到 `unknown_block_lines` / `assembly_unknown_blocks` 字段，确保 `*Beam Section`、`*Spring`、`*Spring Section`、`*Mass`、`*Dashpot`、`*Rotary Inertia` 等关键字及数据行不丢失。
+
 ### 5.2 INP 写出器（`core/inp_writer`）
 
 ```python
@@ -139,6 +143,7 @@ def write_part(part: InpPart, node_offset: int = 0, elem_offset: int = 0) -> lis
 - 单元 ID 重编号：`elem.id + elem_offset`
 - 单元内节点引用重编号：`node_id + node_offset`
 - Nset/Elset ID 偏移
+- 未知关键字块（`*Beam Section`, `*Spring`, `*Mass` 等）原样透传写出，不丢失
 
 **辅助函数**：
 
@@ -166,10 +171,10 @@ class MergeEngine:
 |------|------|
 | Phase 1 | 读取并解析文件 1，计算最大节点/单元 ID 作为偏移量 |
 | Phase 2 | 写出文件 1 的 Heading |
-| Phase 3 | 写出文件 1 的 Parts（原样，offset=0） |
-| Phase 4 | 读取并解析文件 2，写出 Parts（ID + offset，Part 名冲突加 "-2" 后缀） |
-| Phase 5 | 写出合并后的 Assembly（Instance、Nset、Elset、Surface、Coupling 全部去重合并） |
-| Phase 6 | 写出文件 1 的 Material / Step |
+| Phase 3 | 写出文件 1 的 Parts（原样，offset=0，含未知关键字块透传） |
+| Phase 4 | 读取并解析文件 2，写出 Parts（ID + offset，Part 名冲突加 "-2" 后缀；同步更新未知块中的 elset/nset/orientation 引用名） |
+| Phase 5 | 写出合并后的 Assembly（Instance、Nset、Elset、Surface、Coupling 全部去重合并；写出 Assembly 级未知关键字块含 elset 名映射与 ID 偏移） |
+| Phase 6 | 合并 Material/Step 段（材料内容级去重，Step 内 Boundary/Load/Output 智能合并） |
 
 **冲突处理规则**：
 
@@ -177,8 +182,10 @@ class MergeEngine:
 |------|------|
 | Part 名重复 | 加 "-2" 后缀 |
 | Nset / Elset 名重复 | 加 `_{序号}` 后缀 |
-| Surface / Coupling 名重复 | 加 `_{序号}` 后缀，内部引用同步映射 |
+| Surface / Coupling / Constraint 名重复 | 加 `_{序号}` 后缀，内部引用同步映射 |
 | 节点/单元 ID 重叠 | Job-2 的全部 ID 加上 Job-1 的最大 ID 作为偏移 |
+| Part 级未知关键字块（Beam Section 等） | 原样保留，elset/nset/orientation 引用名同步更新 |
+| Assembly 级未知关键字块（MASS Element 等） | elset 引用名映射；`*Element` 数据行 elem_id/node_id + offset |
 
 ---
 
@@ -227,6 +234,7 @@ class MergeEngine:
 |------|------|:--:|
 | 仪表盘首页 | 欢迎页 + 快捷入口 | ✅ |
 | INP 文件合并 | 两个 INP → 一个，自动重编号节点/单元，合并 Assembly | ✅ |
+| 未知关键字保留 | Part/Assembly 级未知关键字自动保留（Beam Section、Spring、MASS 等） | ✅ |
 
 ### 7.2 待开发功能
 
@@ -240,9 +248,33 @@ class MergeEngine:
 
 ---
 
-## 8. 开发与发布
+## 8. 未显式处理关键字的通用保留机制
 
-### 8.1 开发环境
+### 8.1 设计动机
+
+INP 文件包含大量可选关键字（如 `*Beam Section`、`*Spring`、`*Spring Section`、`*Mass`、`*Dashpot`、`*Rotary Inertia` 等），逐一添加显式解析分支会导致代码膨胀且容易遗漏。
+
+采用 **通用捕获机制** —— Part 和 Assembly 解析器的未知关键字 `else` 分支自动保留关键字行+数据行，不经结构化解析直接透传。
+
+### 8.2 实现分层
+
+| 层级 | 存储字段 | 解析位置 | 写出位置 |
+|------|---------|---------|---------|
+| **Part 级** | `InpPart.unknown_block_lines` | `_parse_one_part()` else 分支 | `write_part()` 末尾，`*End Part` 前 |
+| **Assembly 级** | `InpFileModel.assembly_unknown_blocks` | `_parse_assembly()` else 分支 | `_write_assembly()` 末尾，`*End Assembly` 前 |
+
+### 8.3 合并时的引用同步
+
+| 未知块类型 | 处理方式 |
+|-----------|---------|
+| Part 级 | elset/nset/orientation 引用名映射（与 solid/shell section 同理） |
+| Assembly 级 `*Element` | elset 名映射 + elem_offset/node_offset 应用到数据行 |
+| Assembly 级 `*Mass` / `*Spring` | elset 名映射，数据行透传（标量值无需偏移） |
+| Assembly 级其他 | 原样透传 |
+
+## 9. 开发与发布
+
+### 9.1 开发环境
 
 ```bash
 python -m venv .venv
@@ -251,7 +283,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-### 8.2 运行测试
+### 9.2 运行测试
 
 ```bash
 pytest tests/ -v
@@ -259,7 +291,7 @@ pytest tests/ -v
 
 当前：**62 个测试全部通过**（解析器 31 + 写出器 23 + 合并引擎 8）。
 
-### 8.3 打包发布
+### 9.3 打包发布
 
 ```bash
 python build.py
@@ -270,6 +302,7 @@ python build.py
 
 ---
 
-> 版本：v2.0  
-> 日期：2026-05-19  
+> 版本：v2.1  
+> 日期：2026-05-22  
+> 更新：新增 Part/Assembly 级未知关键字通用保留机制，修复 Beam Section / MASS Element 丢失问题  
 > 基于实现方案：Python + PySide6
